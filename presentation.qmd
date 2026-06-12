@@ -1,0 +1,414 @@
+---
+title: "Оценка привлекательности ПИФов и ЗПИФов"
+subtitle: "Доходность, волатильность, риск и прогноз на 3 года — УК «Первая»"
+date: today
+lang: ru
+format:
+  revealjs:
+    theme: [default, custom.scss]
+    embed-resources: true
+    slide-number: c/t
+    progress: true
+    transition: slide
+    width: 1280
+    height: 760
+    toc: false
+    incremental: false
+    code-fold: true
+    fig-align: center
+    df-print: kable
+jupyter: python3
+execute:
+  echo: false
+  warning: false
+---
+
+```{python}
+# | label: setup
+import pathlib
+import warnings
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import prophet as _prophet
+from prophet import Prophet
+
+warnings.filterwarnings("ignore")
+sns.set_theme(style="whitegrid")
+plt.rcParams["figure.figsize"] = (11, 5)
+plt.rcParams["axes.titlesize"] = 14
+
+# prophet linux-колесо приходит с «урезанным» cmdstan (нет makefile) — модель уже
+# собрана, поэтому достаточно создать пустой makefile, чтобы пройти валидацию пути.
+_cmdstan = pathlib.Path(_prophet.__file__).parent / "stan_model" / "cmdstan-2.33.1"
+_mk = _cmdstan / "makefile"
+if _cmdstan.exists() and not _mk.exists():
+    _mk.touch()
+
+funds = pd.read_csv("data/funds.csv", parse_dates=["date"])
+open_funds = sorted(funds.loc[funds["fund_type"] == "open", "fund"].unique())
+closed_funds = sorted(funds.loc[funds["fund_type"] == "closed", "fund"].unique())
+
+# Кросс-секция за 2024 год (стоимости паёв открытых фондов)
+mask = (
+    (funds["fund_type"] == "open")
+    & (funds["date"] >= "2024-01-01")
+    & (funds["date"] <= "2025-01-01")
+)
+prices = funds.loc[mask].pivot(index="date", columns="fund", values="price")[open_funds]
+prices.columns.name = None
+
+returns = prices.pct_change().iloc[1:]
+cum = (1 + returns).cumprod()
+yearly_returns = cum.iloc[-1]  # итоговый ростовой множитель за год
+volatility = returns.rolling(30).std() * np.sqrt(30)
+avg_volatility = volatility.mean()
+```
+
+# Введение
+
+## Что такое ПИФ {.smaller}
+
+**Паевой инвестиционный фонд (ПИФ)** — механизм коллективного инвестирования: средства
+вкладчиков объединяются и передаются профессиональной управляющей компании. Капитал
+распределяется между активами (акции, облигации, недвижимость, денежный рынок), а портфель
+делится на **паи**, цена которых меняется ежедневно.
+
+- **Открытые ПИФы (ОПИФ)** — паи можно купить/погасить в любой рабочий день; высокая ликвидность.
+- **Закрытые ПИФы (ЗПИФ)** — паи фиксируются на срок (часто недвижимость/аренда); расчёт стоимости реже.
+
+::: {.callout-note}
+Целевая аудитория рэнкинга — **долгосрочный консервативный инвестор (физлицо)**: ПИФы не
+предназначены для спекуляций, поэтому риск (волатильность, просадки) важен наравне с доходностью.
+:::
+
+## Задачи исследования
+
+1. **Представить** исследуемые фонды и описать их структуру.
+2. **Разработать алгоритм** оценки привлекательности ПИФа с точки зрения
+   *волатильности* и *доходности*.
+3. **Спрогнозировать** стоимость/доходность ПИФа на **3 года** вперёд и оценить
+   привлекательность уже на основе прогноза (риск + доходность).
+
+## Данные {.smaller}
+
+Все выгрузки УК «Первая» (по каждому фонду: `Дата`, `Пай (₽)`, `СЧА (₽)`, выплаченный доход)
+объединены скриптом `scripts/merge_data.py` в единый «длинный» (tidy) файл `data/funds.csv`.
+
+```{python}
+# | echo: true
+funds.head(4)
+```
+
+```{python}
+# | output: asis
+n_open = len(open_funds)
+n_closed = len(closed_funds)
+d0, d1 = funds["date"].min().date(), funds["date"].max().date()
+print(
+    f"- **{funds['fund'].nunique()} фондов** ({n_open} открытых + {n_closed} закрытых), "
+    f"**{len(funds):,} наблюдений**\n"
+    f"- История: **{d0} → {d1}**\n"
+    f"- Кросс-секционный анализ — на окне **2024 года**, прогноз — по полной истории"
+)
+```
+
+# Открытые ПИФы
+
+## Динамика стоимости паёв (2024)
+
+```{python}
+show = ["Фонд Накопительный", "Фонд российских акций", "Фонд Сбалансированный"]
+norm = prices[show] / prices[show].iloc[0] * 100
+ax = norm.plot()
+ax.set_title("Нормированная стоимость пая (старт 2024 = 100)")
+ax.set_xlabel("Дата")
+ax.set_ylabel("Индекс, пунктов")
+ax.legend(fontsize=9)
+plt.tight_layout()
+plt.show()
+```
+
+## Корреляции дневных доходностей
+
+```{python}
+plt.figure(figsize=(11, 8))
+sns.heatmap(returns.corr(), cmap="coolwarm", center=0, square=True,
+            cbar_kws={"shrink": 0.7})
+plt.title("Тепловая карта корреляций открытых ПИФов (2024)")
+plt.xticks(rotation=45, ha="right", fontsize=7)
+plt.yticks(fontsize=7)
+plt.tight_layout()
+plt.show()
+```
+
+::: {.notes}
+Акционные фонды сильно скоррелированы между собой; денежный/облигационный «Накопительный»
+слабо связан с акциями — он играет роль диверсификатора.
+:::
+
+## Накопленная доходность за год
+
+```{python}
+ax = cum.plot(legend=False)
+ax.set_title("Кумулятивная доходность открытых ПИФов (2024)")
+ax.set_ylabel("Ростовой множитель")
+ax.set_xlabel("Дата")
+plt.tight_layout()
+plt.show()
+```
+
+## Рейтинг по годовой доходности
+
+```{python}
+rank_ret = ((yearly_returns - 1) * 100).sort_values(ascending=False)
+rank_ret.round(2).rename("Годовая доходность, %").to_frame()
+```
+
+## Волатильность
+
+```{python}
+ax = volatility[show].plot()
+ax.set_title("Скользящая (30 дн.) волатильность")
+ax.set_ylabel("Волатильность")
+ax.set_xlabel("Дата")
+ax.legend(fontsize=9)
+plt.tight_layout()
+plt.show()
+```
+
+## Рейтинг по средней волатильности
+
+```{python}
+(avg_volatility.sort_values(ascending=False) * 100).round(2).rename(
+    "Средняя волатильность, %"
+).to_frame()
+```
+
+# Оценка привлекательности (SMART)
+
+## Идея метода {.smaller}
+
+Сводим разнородные показатели к единому баллу **0–10** взвешенной суммой (метод SMART).
+Каждый фактор переводится в балл по экспертной шкале, затем умножается на вес:
+
+| Фактор | Вес | Логика |
+|---|---|---|
+| Рентабельность УК | 0.05 | больше — лучше |
+| Ликвидность пая | 0.10 | больше — лучше |
+| Рэнкинг УК | 0.25 | больше — лучше |
+| **Доходность фонда** | 0.25 | больше — лучше |
+| **Волатильность фонда** | 0.35 | больше — **хуже** |
+
+: Веса подобраны интуитивно под предпочтения розничного инвестора — наибольший вес у риска.
+
+```{python}
+# | echo: true
+# | code-fold: true
+company_data = [54.3, 2, 10]  # УК «Первая»: рентабельность, ликвидность, рэнкинг
+weights = [0.05, 0.1, 0.25, 0.25, 0.35]
+
+
+def returns_quality(yearly_returns, name):
+    x = (yearly_returns[name].item() - 1) * 100
+    return next((s for t, s in [(20, 10), (15, 8), (10, 6), (5, 4)] if x >= t), 0)
+
+
+def volatily_quality(avg_volatility, name):
+    y = avg_volatility[name].item() * 100
+    table = [(30, 0), (20, 2), (15, 4), (10, 6), (5, 8), (3, 9)]
+    return next((s for t, s in table if y >= t), 10)
+
+
+def company_data_conversion(cd):
+    cd = cd.copy()
+    cd[0] = next((s for t, s in [(50, 10), (40, 8), (30, 6), (20, 4), (10, 2)] if cd[0] >= t), 0)
+    cd[1] = {3: 10, 2: 7}.get(cd[1], 0)
+    return cd
+
+
+def ranking(company_data, weights, avg_volatility, yearly_returns, name):
+    full = company_data_conversion(company_data) + [
+        returns_quality(yearly_returns, name),
+        volatily_quality(avg_volatility, name),
+    ]
+    return round(sum(v * w for v, w in zip(full, weights)), 2)
+
+
+def verbal_result(score):
+    table = [(8, "Очень высокая"), (6, "Средняя"), (4, "Низкая")]
+    return next((v for t, v in table if score > t), "Очень низкая") + " привлекательность"
+```
+
+## Результат: три ключевых фонда
+
+```{python}
+# | output: asis
+rows = []
+for name in ["Фонд Накопительный", "Фонд российских акций", "Фонд Сбалансированный"]:
+    score = ranking(company_data, weights, avg_volatility, yearly_returns, name)
+    rows.append((name, score, verbal_result(score)))
+res = pd.DataFrame(rows, columns=["Фонд", "Рейтинг", "Оценка"]).set_index("Фонд")
+print(res.to_markdown())
+```
+
+::: {.fragment}
+«Накопительный» лидирует за счёт **низкой волатильности** (наибольший вес 0.35), несмотря на
+скромный потенциал доходности.
+:::
+
+# Прогнозирование на 3 года
+
+## Модель Prophet {.smaller}
+
+Используем аддитивную регрессионную модель
+$y(t) = g(t) + s(t) + h(t) + \varepsilon_t$, где
+
+- $g(t)$ — тренд (кусочно-линейный / логистический),
+- $s(t)$ — сезонность (ряды Фурье),
+- $h(t)$ — праздники/события,
+- $\varepsilon_t$ — шум.
+
+Прогнозируем **дневную доходность пая** на $360 \times 3$ дней вперёд по полной истории фонда.
+
+```{python}
+# | label: forecast
+def forecast_fund(name):
+    a = funds.loc[funds["fund"] == name, ["date", "price"]].copy()
+    a.columns = ["ds", "y"]
+    a["y"] = a["y"].pct_change()
+    a = a.iloc[1:]
+    m = Prophet()
+    m.fit(a)
+    fc = m.predict(m.make_future_dataframe(periods=360 * 3))
+    fut = fc.loc[fc["ds"] >= "2025-01-01", "yhat"]
+    cum_ret = np.prod([1 + r / 100 for r in fut]) - 1
+    var = a["y"].quantile(0.05)
+    es = a.loc[a["y"] < var, "y"].mean()
+    return {
+        "model": m, "forecast": fc, "name": name,
+        "cum_ret": cum_ret, "mean": fut.mean(), "std": fut.std(ddof=1),
+        "var": abs(var), "es": abs(es),
+    }
+
+
+focus = ["Фонд Накопительный", "Фонд российских акций", "Фонд Сбалансированный"]
+res_fc = {n: forecast_fund(n) for n in focus}
+```
+
+## Прогноз дневной доходности
+
+::: {.panel-tabset}
+
+### Накопительный
+```{python}
+res_fc["Фонд Накопительный"]["model"].plot(res_fc["Фонд Накопительный"]["forecast"])
+plt.title("Фонд Накопительный — прогноз дневной доходности")
+plt.tight_layout()
+plt.show()
+```
+
+### Российских акций
+```{python}
+res_fc["Фонд российских акций"]["model"].plot(res_fc["Фонд российских акций"]["forecast"])
+plt.title("Фонд российских акций — прогноз дневной доходности")
+plt.tight_layout()
+plt.show()
+```
+
+### Сбалансированный
+```{python}
+res_fc["Фонд Сбалансированный"]["model"].plot(res_fc["Фонд Сбалансированный"]["forecast"])
+plt.title("Фонд Сбалансированный — прогноз дневной доходности")
+plt.tight_layout()
+plt.show()
+```
+
+:::
+
+## Риск: Value-at-Risk и Expected Shortfall {.smaller}
+
+- **VaR (5%)** — порог, который дневной убыток не превысит с вероятностью 95%.
+- **ES** — средний убыток в «хвосте» хуже VaR (ожидаемые потери в плохом сценарии).
+
+```{python}
+# | output: asis
+risk = pd.DataFrame(
+    {
+        "Фонд": [n.replace("Фонд ", "") for n in focus],
+        "VaR": [res_fc[n]["var"] for n in focus],
+        "ES": [res_fc[n]["es"] for n in focus],
+        "Прогн. накопл. дох-ть": [res_fc[n]["cum_ret"] for n in focus],
+        "Ср. дневная дох-ть": [res_fc[n]["mean"] for n in focus],
+        "Std": [res_fc[n]["std"] for n in focus],
+    }
+).set_index("Фонд")
+base = 0.1527  # бескупонная доходность ОФЗ, cbr.ru
+rf_daily = (1 + base) ** (1 / 365) - 1
+risk["Коэф. Шарпа"] = (risk["Ср. дневная дох-ть"] - rf_daily) / risk["Std"]
+print(risk.round(4).to_markdown())
+```
+
+## Риск vs доходность
+
+```{python}
+fig, ax = plt.subplots(1, 2, figsize=(12, 4.5))
+colors = ["#d62728", "#1f77b4", "#2ca02c"]
+for axis, metric, title in zip(ax, ["VaR", "ES"], ["Доходность–VaR", "Доходность–ES"]):
+    for i, n in enumerate(focus):
+        axis.scatter(risk[metric].iloc[i], risk["Ср. дневная дох-ть"].iloc[i],
+                     s=120, color=colors[i], label=n.replace("Фонд ", ""))
+    axis.set_xlabel(metric)
+    axis.set_ylabel("Средняя дневная доходность")
+    axis.set_title(title)
+    axis.grid(True)
+ax[0].legend(fontsize=8)
+plt.tight_layout()
+plt.show()
+```
+
+# Выводы
+
+## Доходность против риска {.smaller}
+
+- **По прогнозной доходности** (накопленной и средней дневной): лидер — *российских акций*,
+  затем *сбалансированный*, затем *накопительный*.
+- **По риску** (VaR / ES): порядок **обратный** — самый безопасный *накопительный*.
+- **Коэффициент Шарпа** учитывает оба эффекта одновременно:
+
+```{python}
+# | output: asis
+sharpe = risk["Коэф. Шарпа"].sort_values(ascending=False).round(2)
+print(sharpe.to_frame("Коэф. Шарпа").to_markdown())
+```
+
+::: {.fragment}
+Наибольшая доходность **на единицу риска** — у **«Накопительного»**.
+:::
+
+## Прогноз vs реальность {.smaller}
+
+Прогноз Prophet отражает **нейтральный («спокойный») сценарий**. На исторических данных
+наибольшую фактическую доходность показывал именно «Накопительный» — зеркально прогнозу по
+«сырой» доходности.
+
+**Объяснение:** в прошлые периоды было много экономических шоков и резких колебаний котировок.
+Реализовавшийся риск сильнее всего ударил по фондам, связанным с акциями — поэтому
+риск-скорректированные метрики (Шарп) выводят консервативный фонд вперёд.
+
+## Воспроизводимость {.smaller}
+
+- Данные: единый `data/funds.csv` (скрипт `scripts/merge_data.py`).
+- Окружение: **`uv`** (`pyproject.toml` + `uv.lock`), Python 3.12+.
+- Качество кода: **`ruff`** (формат + линт).
+- Анализ: `financial_risks.ipynb`; презентация: `financial_risks.qmd` (**Quarto reveal.js**).
+
+```bash
+uv sync
+uv run jupyter nbconvert --to notebook --execute financial_risks.ipynb
+uv run quarto render financial_risks.qmd
+```
+
+## Спасибо за внимание {.center}

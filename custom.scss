@@ -1,0 +1,29 @@
+/*-- scss:defaults --*/
+$font-size-root: 30px;
+$presentation-heading-color: #1a3c5e;
+$link-color: #2a6f97;
+
+/*-- scss:rules --*/
+.reveal section h1,
+.reveal section h2 {
+  letter-spacing: -0.01em;
+}
+
+.reveal table {
+  font-size: 0.7em;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.reveal table th {
+  background: #1a3c5e;
+  color: #fff;
+}
+
+.reveal .smaller {
+  font-size: 0.78em;
+}
+
+.reveal .callout {
+  font-size: 0.8em;
+}
