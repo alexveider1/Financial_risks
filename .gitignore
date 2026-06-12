@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# uv / virtualenv
+.venv/
+
+# Jupyter / Quarto build artifacts
+*_files/
+.quarto/
+
+# Raw Excel exports — merged into the committed data/funds.csv via scripts/merge_data.py
+data/raw/
+
+# OS / editor
+.DS_Store
+*.Zone.Identifier
+.vscode/
+
+.ruff_cache/
