@@ -1,0 +1,38 @@
+[project]
+name = "financial-risks"
+version = "0.1.0"
+description = "Оценка привлекательности ПИФов и ЗПИФов УК «Первая»: доходность, волатильность, риск и прогноз на 3 года"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy==2.3.0",
+    "pandas==2.3.0",
+    "matplotlib==3.10.3",
+    "seaborn==0.13.2",
+    "plotly==6.1.2",
+    "prophet==1.1.7",
+    "scikit-learn==1.7.0",
+    "scipy==1.15.3",
+    "openpyxl>=3.1",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.12",
+    "jupyter>=1.1",
+    "nbconvert>=7.16",
+    "ipykernel>=6.29",
+    "nbformat>=5.10",
+    "tabulate>=0.10.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
